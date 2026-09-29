@@ -1,0 +1,6 @@
+/target
+/config.json
+/voices
+/clips
+.env
+.cockatiel_pb2_cache/

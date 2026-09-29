@@ -1,0 +1,36 @@
+{
+  "name": "tts-rs",
+  "description": "Local text-to-speech (default). Renders chat messages to speech with a Piper VITS model via sherpa-onnx — a single native binary, no Python/pip/torch. The model bundle is downloaded once at startup into voices/. For model families not supported here, use the opt-in tts-experimental-py module.",
+  "version": "0.1.0",
+  "capabilities": "postprocess",
+  "root_file": "./src/main.rs",
+  "launch_command": "cargo run",
+  "command_flags": ["--release"],
+  "binary": {
+    "linux": {
+      "aarch64": "target/release/cockatiel_tts_rs",
+      "arm": "target/release/cockatiel_tts_rs",
+      "x86_64": "target/release/cockatiel_tts_rs"
+    },
+    "macos": {
+      "aarch64": "target/release/cockatiel_tts_rs",
+      "arm": "target/release/cockatiel_tts_rs",
+      "x86_64": "target/release/cockatiel_tts_rs"
+    },
+    "windows": {
+      "aarch64": "target/release/cockatiel_tts_rs.exe",
+      "arm": "target/release/cockatiel_tts_rs.exe",
+      "x86_64": "target/release/cockatiel_tts_rs.exe"
+    }
+  },
+  "build_command": "cargo",
+  "build_flags": ["build", "--release"],
+  "credentials": [
+    { "key": "model", "label": "Model bundle (name or URL)", "list": false, "sensitive": false },
+    { "key": "max_chars", "label": "Max chars per message", "list": false, "sensitive": false },
+    { "key": "max_audio_bytes", "label": "Max audio bytes", "list": false, "sensitive": false },
+    { "key": "play_locally", "label": "Play locally", "list": false, "sensitive": false },
+    { "key": "speaker_id", "label": "Speaker ID", "list": false, "sensitive": false }
+  ],
+  "autostart": true
+}
