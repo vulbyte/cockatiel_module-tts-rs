@@ -31,6 +31,39 @@ majority of users should use.
 | `speaker_id` | `0` | multi-speaker voice id |
 | `reconnect_base_secs` / `reconnect_max_secs` | `1` / `30` | engine reconnect backoff |
 
+### Changing the voice
+
+Edit `config.json` in the module directory (it lives next to `tts_service.py`
+in the module folder; the TUI also exposes these fields under the module's
+edit screen). The `model` field selects the voice/bundle and `speaker_id`
+picks a voice within a multi-voice bundle.
+
+The default voice is the **US English "lessac medium"** Piper model
+(`vits-piper-en_US-lessac-medium`). Other ready-made bundles (all downloadable
+on first start, no Python needed):
+
+| `model` | voice |
+| --- | --- |
+| `vits-piper-en_US-lessac-medium` | US English, "lessac" medium (default) |
+| `vits-piper-en_US-lessac-low` | US English, "lessac" low |
+| `vits-piper-en_US-lessac-high` | US English, "lessac" high |
+| `vits-piper-en_US-amy-medium` | US English, "amy" medium |
+| `vits-piper-en_GB-alan-medium` | British English, "alan" medium |
+| `vits-piper-en_GB-jenny_dioco-medium` | British English, "jenny" medium |
+| `vits-piper-fr_FR-upmc-medium` | French, "upmc" medium |
+| `vits-piper-de_DE-thorsten-medium` | German, "thorsten" medium |
+| `vits-piper-es_ES-davefx-medium` | Spanish, "davefx" medium |
+
+To switch voices, set `model` to one of the above (or any `vits-piper-*`
+bundle in the
+[sherpa-onnx `tts-models` release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models)),
+then restart the module (press `x` then `s` on it in the modules window). The
+new bundle downloads into `voices/` on the next start. A full `.tar.bz2` URL
+or a local unpacked directory also works.
+
+`speaker_id` only matters for multi-speaker bundles (check `num_speakers` in
+the model card); the single-speaker Piper voices ignore it.
+
 ## Dependencies
 
 - [cockatiel-client](https://github.com/vulbyte/cockatiel_client-rs) (pinned by git rev)

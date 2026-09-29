@@ -416,17 +416,35 @@ async fn run_session(
                 }
                 Some(Payload::MessagePostProcess(post)) => {
                     let uuid = post.message_uuid7;
-                    // Which text to speak: the processed message, else the raw.
-                    let mut text = post.processed_message.clone();
-                    if text.trim().is_empty() {
+                    // Which text to consider: the processed message, else the raw.
+                    let mut raw = post.processed_message.clone();
+                    if raw.trim().is_empty() {
                         if let Some(cm) = &post.raw_message {
                             if !cm.raw_message.trim().is_empty() {
-                                text = cm.raw_message.clone();
+                                raw = cm.raw_message.clone();
                             }
                         }
                     }
+                    // COMMAND-SCOPED: this module only renders `!tts ...`
+                    // messages. Anything else is acknowledged empty (the stage
+                    // completes with no audio) so the module never speaks chat
+                    // the user didn't ask for.
+                    let Some(mut text) = extract_tts_prompt(&raw) else {
+                        send_container(
+                            &write_shared,
+                            ack_post_process(
+                                &session,
+                                uuid,
+                                String::new(),
+                                Vec::new(),
+                                String::new(),
+                            ),
+                        )
+                        .await;
+                        continue;
+                    };
                     if text.trim().is_empty() {
-                        // Nothing to say; still ack so the stage completes.
+                        // A bare `!tts` with nothing to say still acks.
                         send_container(
                             &write_shared,
                             ack_post_process(
@@ -574,6 +592,34 @@ fn get_safe_filename(text: &str, max: usize) -> String {
     trimmed.chars().take(max).collect()
 }
 
+/// Extract the text to speak from a message, IF it is a `!tts` command.
+///
+/// Returns `Some(prompt)` when the message is a `!tts ...` command (the prompt
+/// is everything after the `!tts` token, leading whitespace trimmed), and
+/// `None` for anything else. This module is COMMAND-SCOPED: it must not render
+/// every chat message — only ones the user explicitly asked to be spoken.
+///
+/// The command shape is `!tts [flags] <prompt>`; flags are not yet interpreted
+/// (voice selection lives in config), so only the prompt is returned today.
+fn extract_tts_prompt(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("!tts") {
+        return None;
+    }
+    let rest = &trimmed[4..];
+    // Require a separator (space) after the command token so `!ttssomething`
+    // is not treated as a command.
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Some(String::new());
+    }
+    if !trimmed[4..].starts_with(char::is_whitespace) && !trimmed[4..].is_empty() {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,5 +688,16 @@ mod tests {
         };
         assert!(post.audio.is_empty());
         assert_eq!(post.audio_type, "");
+    }
+
+    #[test]
+    fn extract_tts_prompt_only_accepts_tts_commands() {
+        assert_eq!(extract_tts_prompt("!tts hello world"), Some("hello world".into()));
+        assert_eq!(extract_tts_prompt("  !tts   hello  "), Some("hello".into()));
+        assert_eq!(extract_tts_prompt("!tts"), Some(String::new()));
+        assert_eq!(extract_tts_prompt("hello world"), None, "plain chat is never spoken");
+        assert_eq!(extract_tts_prompt("!ttssomething"), None, "no separator after the token");
+        assert_eq!(extract_tts_prompt("!tts hello"), Some("hello".into()));
+        assert_eq!(extract_tts_prompt("!TTS HELLO"), Some("HELLO".into()), "case-insensitive command");
     }
 }
