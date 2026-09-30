@@ -341,6 +341,27 @@ async fn run_session(
 
     let _ = mpsc::unbounded_channel::<PromptResponse>();
 
+    // Register the `!tts` command so the engine routes ONLY `!tts` messages to
+    // this module (command scoping). The engine sends a module that registered
+    // specific commands nothing else — so this module no longer receives (and
+    // has to discard) every chat message.
+    let commands = Container {
+        version: 1,
+        auth_token: session.auth_token.clone(),
+        module_name: session.module_name.clone(),
+        module_instance_uuid7: session.instance_uuid7.clone(),
+        payload: Some(Payload::CommandsPayload(Commands {
+            commands: vec![Command {
+                command_name: "tts".to_string(),
+                command_flag: "!".to_string(),
+                command_description: "read a message out loud via TTS (e.g. !tts hello chat)".to_string(),
+                command_flags: vec![],
+            }],
+            alert_on_unknown_command: false,
+        })),
+    };
+    send_container(&write_shared, commands).await;
+
     let mut read = read;
 
     // Load the TTS engine once per session.
