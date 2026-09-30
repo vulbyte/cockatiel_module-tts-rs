@@ -1,4 +1,5 @@
 {
+  "authority": 0,
   "autostart": true,
   "binary": {
     "linux": {
@@ -58,12 +59,11 @@
       "sensitive": false
     }
   ],
-  "description": "Local text-to-speech (default). Renders chat messages to speech with a Piper VITS model via sherpa-onnx \u2014 a single native binary, no Python/pip/torch. The model bundle is downloaded once at startup into voices/. For model families not supported here, use the opt-in tts-experimental-py module.",
+  "description": "Local text-to-speech (default). Renders chat messages to speech with a Piper VITS model via sherpa-onnx — a single native binary, no Python/pip/torch. The model bundle is downloaded once at startup into voices/. For model families not supported here, use the opt-in tts-experimental-py module.",
   "launch_command": "cargo run",
-  "name": "tts-rs",
-  "root_file": "./src/main.rs",
-  "version": "0.1.0",
-  "price": 0,
   "min_rank": 0,
-  "authority": 0
+  "name": "tts-rs",
+  "price": 0,
+  "root_file": "./src/main.rs",
+  "version": "0.1.0"
 }
