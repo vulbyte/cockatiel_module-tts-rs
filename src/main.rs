@@ -403,6 +403,18 @@ async fn run_session(
                     send_container(&write_shared, reply).await;
                 }
                 Some(ModulePayload::MessagePreProcess(pre)) => {
+                    if !pre.message_uuid7.is_empty() {
+                        let receipt = ContainerForEngine {
+                            version: 2,
+                            auth_token: session.auth_token.clone(),
+                            module_name: session.module_name.clone(),
+                            module_instance_uuid7: session.instance_uuid7.clone(),
+                            payload: Some(EnginePayload::MessageAck(MessageAck {
+                                message_uuid7: pre.message_uuid7.clone(),
+                            })),
+                        };
+                        send_container(&write_shared, receipt).await;
+                    }
                     // Pass-through ack so a stray pre-process frame never
                     // stalls the chain (this module only declares postprocess).
                     let ack = ContainerForEngine {
@@ -420,6 +432,18 @@ async fn run_session(
                     send_container(&write_shared, ack).await;
                 }
                 Some(ModulePayload::MessageInProcess(process)) => {
+                    if !process.message_uuid7.is_empty() {
+                        let receipt = ContainerForEngine {
+                            version: 2,
+                            auth_token: session.auth_token.clone(),
+                            module_name: session.module_name.clone(),
+                            module_instance_uuid7: session.instance_uuid7.clone(),
+                            payload: Some(EnginePayload::MessageAck(MessageAck {
+                                message_uuid7: process.message_uuid7.clone(),
+                            })),
+                        };
+                        send_container(&write_shared, receipt).await;
+                    }
                     let ack = ContainerForEngine {
                         version: 2,
                         auth_token: session.auth_token.clone(),
@@ -438,6 +462,18 @@ async fn run_session(
                 }
                 Some(ModulePayload::MessagePostProcess(post)) => {
                     let uuid = post.message_uuid7;
+                    if !uuid.is_empty() {
+                        let receipt = ContainerForEngine {
+                            version: 2,
+                            auth_token: session.auth_token.clone(),
+                            module_name: session.module_name.clone(),
+                            module_instance_uuid7: session.instance_uuid7.clone(),
+                            payload: Some(EnginePayload::MessageAck(MessageAck {
+                                message_uuid7: uuid.clone(),
+                            })),
+                        };
+                        send_container(&write_shared, receipt).await;
+                    }
                     // Which text to consider: the processed message, else the raw.
                     let mut raw = post.processed_message.clone();
                     if raw.trim().is_empty() {
