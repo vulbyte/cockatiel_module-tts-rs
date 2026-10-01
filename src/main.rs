@@ -55,10 +55,10 @@ struct Config {
     /// Whether to also play the clip on this machine (for no-display setups).
     play_locally: bool,
     /// Optional voice/speaker id for multi-speaker models (0 = default).
-    speaker_id: i64,
+    speaker_id: i32,
     /// Reconnect backoff bounds (seconds), same shape as the Python module.
-    reconnect_base_secs: u64,
-    reconnect_max_secs: u64,
+    reconnect_base_secs: u32,
+    reconnect_max_secs: u32,
 }
 
 impl Default for Config {
@@ -322,7 +322,7 @@ async fn session_loop(config: &Config, model_dir: &Path) {
             Err(e) => error!("session error: {e}"),
         }
         warn!("engine disconnected — reconnecting in {backoff}s");
-        tokio::time::sleep(Duration::from_secs(backoff)).await;
+        tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
         backoff = (backoff * 2).min(config.reconnect_max_secs.max(1));
     }
 }
@@ -620,7 +620,7 @@ fn render(
     config: &Config,
 ) -> Result<Vec<u8>, String> {
     let gen = GenerationConfig {
-        sid: config.speaker_id as i32,
+        sid: config.speaker_id,
         ..Default::default()
     };
     let audio = tts
