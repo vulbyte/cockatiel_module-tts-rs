@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cockatiel_client::proto::container::Payload;
+use cockatiel_client::proto::container_for_engine::Payload as EnginePayload;
+use cockatiel_client::proto::container_for_module::Payload as ModulePayload;
 use cockatiel_client::proto::*;
 use cockatiel_client::CockatielClient;
 use futures_util::{SinkExt, StreamExt};
@@ -261,13 +262,13 @@ fn ack_post_process(
     processed_message: String,
     audio: Vec<u8>,
     audio_type: String,
-) -> Container {
-    Container {
-        version: 1,
+) -> ContainerForEngine {
+    ContainerForEngine {
+        version: 2,
         auth_token: s.auth_token.clone(),
         module_name: s.module_name.clone(),
         module_instance_uuid7: s.instance_uuid7.clone(),
-        payload: Some(Payload::MessagePostProcess(MessagePostProcess {
+        payload: Some(EnginePayload::MessagePostProcess(MessagePostProcess {
             message_uuid7: uuid,
             raw_message: None,
             processed_message,
@@ -277,7 +278,7 @@ fn ack_post_process(
     }
 }
 
-async fn send_container(write: &Arc<AsyncMutex<WsWriteHalf>>, container: Container) {
+async fn send_container(write: &Arc<AsyncMutex<WsWriteHalf>>, container: ContainerForEngine) {
     let mut buf = Vec::new();
     if container.encode(&mut buf).is_ok() {
         let mut w = write.lock().await;
@@ -345,12 +346,12 @@ async fn run_session(
     // this module (command scoping). The engine sends a module that registered
     // specific commands nothing else — so this module no longer receives (and
     // has to discard) every chat message.
-    let commands = Container {
-        version: 1,
+    let commands = ContainerForEngine {
+        version: 2,
         auth_token: session.auth_token.clone(),
         module_name: session.module_name.clone(),
         module_instance_uuid7: session.instance_uuid7.clone(),
-        payload: Some(Payload::CommandsPayload(Commands {
+        payload: Some(EnginePayload::Commands(Commands {
             commands: vec![Command {
                 command_name: "tts".to_string(),
                 command_flag: "!".to_string(),
@@ -384,32 +385,32 @@ async fn run_session(
                     break;
                 }
             };
-            let Ok(container) = Container::decode(data.as_ref()) else {
+            let Ok(container) = ContainerForModule::decode(data.as_ref()) else {
                 continue;
             };
 
             match container.payload {
-                Some(Payload::AuthVerify(_)) => {
-                    let reply = Container {
-                        version: 1,
+                Some(ModulePayload::AuthVerify(_)) => {
+                    let reply = ContainerForEngine {
+                        version: 2,
                         auth_token: session.auth_token.clone(),
                         module_name: session.module_name.clone(),
                         module_instance_uuid7: session.instance_uuid7.clone(),
-                        payload: Some(Payload::AuthVerify(AuthVerify {
+                        payload: Some(EnginePayload::AuthVerify(AuthVerify {
                             cur_auth: session.auth_token.clone(),
                         })),
                     };
                     send_container(&write_shared, reply).await;
                 }
-                Some(Payload::MessagePreProcess(pre)) => {
+                Some(ModulePayload::MessagePreProcess(pre)) => {
                     // Pass-through ack so a stray pre-process frame never
                     // stalls the chain (this module only declares postprocess).
-                    let ack = Container {
-                        version: 1,
+                    let ack = ContainerForEngine {
+                        version: 2,
                         auth_token: session.auth_token.clone(),
                         module_name: session.module_name.clone(),
                         module_instance_uuid7: session.instance_uuid7.clone(),
-                        payload: Some(Payload::MessagePreProcess(MessagePreProcess {
+                        payload: Some(EnginePayload::MessagePreProcess(MessagePreProcess {
                             message_uuid7: pre.message_uuid7,
                             raw_message: pre.raw_message,
                             audio: pre.audio,
@@ -418,13 +419,13 @@ async fn run_session(
                     };
                     send_container(&write_shared, ack).await;
                 }
-                Some(Payload::MessageInProcess(process)) => {
-                    let ack = Container {
-                        version: 1,
+                Some(ModulePayload::MessageInProcess(process)) => {
+                    let ack = ContainerForEngine {
+                        version: 2,
                         auth_token: session.auth_token.clone(),
                         module_name: session.module_name.clone(),
                         module_instance_uuid7: session.instance_uuid7.clone(),
-                        payload: Some(Payload::MessageInProcess(MessageInProcess {
+                        payload: Some(EnginePayload::MessageInProcess(MessageInProcess {
                             message_uuid7: process.message_uuid7,
                             raw_message: process.raw_message,
                             processed_message: process.processed_message,
@@ -435,7 +436,7 @@ async fn run_session(
                     };
                     send_container(&write_shared, ack).await;
                 }
-                Some(Payload::MessagePostProcess(post)) => {
+                Some(ModulePayload::MessagePostProcess(post)) => {
                     let uuid = post.message_uuid7;
                     // Which text to consider: the processed message, else the raw.
                     let mut raw = post.processed_message.clone();
@@ -686,7 +687,7 @@ mod tests {
         assert_eq!(c.module_name, "tts-rs");
         assert_eq!(c.auth_token, "tok");
         let post = match c.payload {
-            Some(Payload::MessagePostProcess(p)) => p,
+            Some(EnginePayload::MessagePostProcess(p)) => p,
             _ => panic!("expected MessagePostProcess"),
         };
         assert_eq!(post.message_uuid7, "msg-1");
@@ -704,7 +705,7 @@ mod tests {
         };
         let c = ack_post_process(&s, "m".into(), String::new(), Vec::new(), String::new());
         let post = match c.payload {
-            Some(Payload::MessagePostProcess(p)) => p,
+            Some(EnginePayload::MessagePostProcess(p)) => p,
             _ => panic!("expected MessagePostProcess"),
         };
         assert!(post.audio.is_empty());
