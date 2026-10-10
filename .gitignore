@@ -2,5 +2,6 @@
 /config.json
 /voices
 /clips
+/voice_samples
 .env
 .cockatiel_pb2_cache/

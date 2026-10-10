@@ -1,6 +1,6 @@
 //! Cockatiel TTS module (Rust).
 //!
-//! A post-process module that renders chat messages into speech using a local
+//! An in-process module that renders chat messages into speech using a local
 //! Piper VITS model via `sherpa-onnx`. It is the DEFAULT, zero-setup TTS path:
 //! a single native binary (no Python, no torch, no pip). The model is a
 //! self-contained `.tar.bz2` bundle (`.onnx` + `tokens.txt` + `espeak-ng-data`)
@@ -54,11 +54,35 @@ struct Config {
     max_audio_bytes: usize,
     /// Whether to also play the clip on this machine (for no-display setups).
     play_locally: bool,
-    /// Optional voice/speaker id for multi-speaker models (0 = default).
-    speaker_id: i32,
+    /// The default voice/speaker id, keyed by the `v` flag alias (per the
+    /// per-flag-defaults pattern). Blank/absent falls back to the module
+    /// default (0). There is deliberately no separate `speaker_id` key — `v`
+    /// IS the setting, so there is one place to change the default voice.
+    #[serde(default, deserialize_with = "de_opt_i32")]
+    v: Option<i32>,
     /// Reconnect backoff bounds (seconds), same shape as the Python module.
     reconnect_base_secs: u32,
     reconnect_max_secs: u32,
+}
+
+/// A JSON value (number or string — the config editor can write either) as an
+/// i32, or `None` when unusable.
+fn json_i32(v: &serde_json::Value) -> Option<i32> {
+    match v {
+        serde_json::Value::Number(n) => n.as_i64().map(|n| n as i32),
+        serde_json::Value::String(s) => s.trim().parse::<i32>().ok(),
+        _ => None,
+    }
+}
+
+/// Deserialize a voice id that may be a JSON number OR a string, yielding `None`
+/// for anything unusable so a stray value never fails the whole config parse.
+fn de_opt_i32<'de, D>(d: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.as_ref().and_then(json_i32))
 }
 
 impl Default for Config {
@@ -68,7 +92,7 @@ impl Default for Config {
             max_chars: 1000,
             max_audio_bytes: 5 * 1024 * 1024,
             play_locally: false,
-            speaker_id: 0,
+            v: None,
             reconnect_base_secs: 1,
             reconnect_max_secs: 30,
         }
@@ -86,8 +110,64 @@ fn load_config(path: &Path) -> (Config, serde_json::Value) {
         .get("module_specific")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    let config: Config = serde_json::from_value(specific).unwrap_or_default();
+    let mut config: Config = serde_json::from_value(specific.clone()).unwrap_or_default();
+    // `v` is the ONLY default-voice key. On first load, migrate the legacy
+    // `speaker_id` value (if present) into `v`; otherwise start at the module
+    // default (0). Either way the legacy key is dropped from the file, so there
+    // is exactly one place to set the default voice.
+    let mut changed = false;
+    if config.v.is_none() {
+        config.v = Some(specific.get("speaker_id").and_then(json_i32).unwrap_or(0));
+        changed = true;
+    }
+    if specific.get("speaker_id").is_some() {
+        changed = true;
+    }
+    if changed {
+        write_config(path, config.v.unwrap_or(0));
+    }
     (config, serde_json::Value::Null)
+}
+
+/// Write `module_specific.v` and drop the legacy `speaker_id`, preserving every
+/// other key in the file. Best-effort: a read/write failure is ignored (the
+/// in-memory `config.v` is still correct).
+fn write_config(path: &Path, v: i32) {
+    let Ok(data) = std::fs::read_to_string(path) else { return };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&data) else { return };
+    let Some(obj) = root.as_object_mut() else { return };
+    let ms = obj
+        .entry("module_specific".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(ms) = ms.as_object_mut() else { return };
+    ms.insert("v".to_string(), serde_json::json!(v));
+    ms.remove("speaker_id");
+    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+        let _ = std::fs::write(path, pretty);
+    }
+}
+
+/// The speaker id to render with. A per-message `-v` wins; otherwise the
+/// CURRENT `v` is read from `config.json` on disk (so a saved config change is
+/// honoured on the next message with no restart), falling back to the in-memory
+/// value then the module default (0). Clamped to the flag's declared range.
+fn resolve_voice(override_id: Option<i32>, in_mem_v: Option<i32>, disk_v: Option<i32>) -> i32 {
+    override_id
+        .or(disk_v)
+        .or(in_mem_v)
+        .unwrap_or(0)
+        .clamp(0, 903)
+}
+
+/// Read `module_specific.v` from `config.json` on disk (best-effort), so a
+/// config edit takes effect on the next message instead of requiring a restart.
+/// Called only when a message supplies no `-v` override.
+fn current_config_v() -> Option<i32> {
+    let data = std::fs::read_to_string("config.json").ok()?;
+    let root: serde_json::Value = serde_json::from_str(&data).ok()?;
+    root.get("module_specific")
+        .and_then(|ms| ms.get("v"))
+        .and_then(json_i32)
 }
 
 // ── model / voice management ──────────────────────────────────────────────
@@ -254,12 +334,12 @@ impl Dedup {
     }
 }
 
-/// Build the reply container that acks a post-process message (with audio if
-/// we rendered some). Empty audio is still a valid ack — the stage completes.
-fn ack_post_process(
+/// Build the reply container that acks an IN-PROCESS message (with audio if we
+/// rendered some). The processed message is echoed UNCHANGED (this module only
+/// adds audio); empty audio is still a valid ack — the stage completes.
+fn ack_in_process(
     s: &Session,
-    uuid: String,
-    processed_message: String,
+    process: MessageInProcess,
     audio: Vec<u8>,
     audio_type: String,
 ) -> ContainerForEngine {
@@ -268,10 +348,11 @@ fn ack_post_process(
         auth_token: s.auth_token.clone(),
         module_name: s.module_name.clone(),
         module_instance_uuid7: s.instance_uuid7.clone(),
-        payload: Some(EnginePayload::MessagePostProcess(MessagePostProcess {
-            message_uuid7: uuid,
-            raw_message: None,
-            processed_message,
+        payload: Some(EnginePayload::MessageInProcess(MessageInProcess {
+            message_uuid7: process.message_uuid7,
+            raw_message: process.raw_message,
+            processed_message: process.processed_message,
+            abandon_message: false,
             audio,
             audio_type,
         })),
@@ -356,7 +437,15 @@ async fn run_session(
                 command_name: "tts".to_string(),
                 command_flag: "!".to_string(),
                 command_description: "read a message out loud via TTS (e.g. !tts hello chat)".to_string(),
-                command_flags: vec![],
+                command_flags: vec![Flag {
+                    flag_name: "v".to_string(),
+                    flag_description: "voice/speaker id for the current model (overrides the config default)".to_string(),
+                    limiting_type: 3, // FLAG_LIMIT_TYPE_RANGE
+                    min_val: 0.0,
+                    max_val: 903.0,
+                    options: vec![],
+                    value: String::new(),
+                }],
             }],
             alert_on_unknown_command: false,
         })),
@@ -416,7 +505,7 @@ async fn run_session(
                         send_container(&write_shared, receipt).await;
                     }
                     // Pass-through ack so a stray pre-process frame never
-                    // stalls the chain (this module only declares postprocess).
+                    // stalls the chain (this module renders in-process).
                     let ack = ContainerForEngine {
                         version: 2,
                         auth_token: session.auth_token.clone(),
@@ -444,40 +533,11 @@ async fn run_session(
                         };
                         send_container(&write_shared, receipt).await;
                     }
-                    let ack = ContainerForEngine {
-                        version: 2,
-                        auth_token: session.auth_token.clone(),
-                        module_name: session.module_name.clone(),
-                        module_instance_uuid7: session.instance_uuid7.clone(),
-                        payload: Some(EnginePayload::MessageInProcess(MessageInProcess {
-                            message_uuid7: process.message_uuid7,
-                            raw_message: process.raw_message,
-                            processed_message: process.processed_message,
-                            abandon_message: process.abandon_message,
-                            audio: process.audio,
-                            audio_type: process.audio_type,
-                        })),
-                    };
-                    send_container(&write_shared, ack).await;
-                }
-                Some(ModulePayload::MessagePostProcess(post)) => {
-                    let uuid = post.message_uuid7;
-                    if !uuid.is_empty() {
-                        let receipt = ContainerForEngine {
-                            version: 2,
-                            auth_token: session.auth_token.clone(),
-                            module_name: session.module_name.clone(),
-                            module_instance_uuid7: session.instance_uuid7.clone(),
-                            payload: Some(EnginePayload::MessageAck(MessageAck {
-                                message_uuid7: uuid.clone(),
-                            })),
-                        };
-                        send_container(&write_shared, receipt).await;
-                    }
+                    let uuid = process.message_uuid7.clone();
                     // Which text to consider: the processed message, else the raw.
-                    let mut raw = post.processed_message.clone();
+                    let mut raw = process.processed_message.clone();
                     if raw.trim().is_empty() {
-                        if let Some(cm) = &post.raw_message {
+                        if let Some(cm) = &process.raw_message {
                             if !cm.raw_message.trim().is_empty() {
                                 raw = cm.raw_message.clone();
                             }
@@ -487,31 +547,20 @@ async fn run_session(
                     // messages. Anything else is acknowledged empty (the stage
                     // completes with no audio) so the module never speaks chat
                     // the user didn't ask for.
-                    let Some(mut text) = extract_tts_prompt(&raw) else {
+                    let Some(args) = parse_tts(&raw) else {
                         send_container(
                             &write_shared,
-                            ack_post_process(
-                                &session,
-                                uuid,
-                                String::new(),
-                                Vec::new(),
-                                String::new(),
-                            ),
+                            ack_in_process(&session, process, Vec::new(), String::new()),
                         )
                         .await;
                         continue;
                     };
+                    let mut text = args.prompt;
                     if text.trim().is_empty() {
                         // A bare `!tts` with nothing to say still acks.
                         send_container(
                             &write_shared,
-                            ack_post_process(
-                                &session,
-                                uuid,
-                                String::new(),
-                                Vec::new(),
-                                String::new(),
-                            ),
+                            ack_in_process(&session, process, Vec::new(), String::new()),
                         )
                         .await;
                         continue;
@@ -519,6 +568,11 @@ async fn run_session(
                     if text.chars().count() > max_chars {
                         text = text.chars().take(max_chars).collect();
                     }
+
+                    // `-v <id>` overrides the default voice for this message
+                    // only; otherwise the configured `v` is read FRESH from
+                    // disk so a saved config change applies without a restart.
+                    let sid = resolve_voice(args.voice, config.v, current_config_v());
 
                     let safe = get_safe_filename(&text, 50);
                     let cached = PathBuf::from("clips")
@@ -529,20 +583,14 @@ async fn run_session(
                         let audio = std::fs::read(&cached).unwrap_or_default();
                         send_container(
                             &write_shared,
-                            ack_post_process(
-                                &session,
-                                uuid,
-                                text.clone(),
-                                audio,
-                                "audio/wav".into(),
-                            ),
+                            ack_in_process(&session, process, audio, "audio/wav".into()),
                         )
                         .await;
                         continue;
                     }
 
-                    info!("rendering speech for {uuid}: {text:?}");
-                    let rendered = render(&tts, &text, &cached, config);
+                    info!("rendering speech for {uuid}: {text:?} (voice {sid})");
+                    let rendered = render(&tts, &text, &cached, sid);
                     let (audio, audio_type) = match rendered {
                         Ok(bytes) => {
                             if bytes.len() > max_audio_bytes {
@@ -563,9 +611,41 @@ async fn run_session(
                     dedup.insert(uuid.clone());
                     send_container(
                         &write_shared,
-                        ack_post_process(&session, uuid, text, audio, audio_type),
+                        ack_in_process(&session, process, audio, audio_type),
                     )
                     .await;
+                }
+                Some(ModulePayload::MessagePostProcess(post)) => {
+                    // This module renders in-process now, so it is not normally
+                    // sent post-process frames. Pass-through ack (echoing every
+                    // incoming field) so a stray frame can never stall the
+                    // chain — mirroring the pre-process arm.
+                    if !post.message_uuid7.is_empty() {
+                        let receipt = ContainerForEngine {
+                            version: 2,
+                            auth_token: session.auth_token.clone(),
+                            module_name: session.module_name.clone(),
+                            module_instance_uuid7: session.instance_uuid7.clone(),
+                            payload: Some(EnginePayload::MessageAck(MessageAck {
+                                message_uuid7: post.message_uuid7.clone(),
+                            })),
+                        };
+                        send_container(&write_shared, receipt).await;
+                    }
+                    let ack = ContainerForEngine {
+                        version: 2,
+                        auth_token: session.auth_token.clone(),
+                        module_name: session.module_name.clone(),
+                        module_instance_uuid7: session.instance_uuid7.clone(),
+                        payload: Some(EnginePayload::MessagePostProcess(MessagePostProcess {
+                            message_uuid7: post.message_uuid7,
+                            raw_message: post.raw_message,
+                            processed_message: post.processed_message,
+                            audio: post.audio,
+                            audio_type: post.audio_type,
+                        })),
+                    };
+                    send_container(&write_shared, ack).await;
                 }
                 _ => {}
         }
@@ -617,10 +697,10 @@ fn render(
     tts: &OfflineTts,
     text: &str,
     out: &Path,
-    config: &Config,
+    sid: i32,
 ) -> Result<Vec<u8>, String> {
     let gen = GenerationConfig {
-        sid: config.speaker_id,
+        sid,
         ..Default::default()
     };
     let audio = tts
@@ -650,32 +730,65 @@ fn get_safe_filename(text: &str, max: usize) -> String {
     trimmed.chars().take(max).collect()
 }
 
-/// Extract the text to speak from a message, IF it is a `!tts` command.
+/// A parsed `!tts [flags] <prompt>` invocation.
+struct TtsArgs {
+    /// The `-v <id>` voice/speaker override, when the caller supplied one.
+    voice: Option<i32>,
+    /// The text to speak (the message with the command token and flags removed).
+    prompt: String,
+}
+
+/// Parse a `!tts [flags] <prompt>` command. Returns `None` when the message is
+/// not a `!tts` command (this module is COMMAND-SCOPED — it must never render
+/// chat the user didn't ask to be spoken).
 ///
-/// Returns `Some(prompt)` when the message is a `!tts ...` command (the prompt
-/// is everything after the `!tts` token, leading whitespace trimmed), and
-/// `None` for anything else. This module is COMMAND-SCOPED: it must not render
-/// every chat message — only ones the user explicitly asked to be spoken.
-///
-/// The command shape is `!tts [flags] <prompt>`; flags are not yet interpreted
-/// (voice selection lives in config), so only the prompt is returned today.
-fn extract_tts_prompt(message: &str) -> Option<String> {
+/// Flag syntax mirrors the engine's parser: `-v 250`, `-v:250`, or a bare `-v`
+/// (value "true"). The only flag interpreted here is `v` (voice/speaker id); any
+/// other flag is consumed (so it isn't spoken) but ignored.
+fn parse_tts(message: &str) -> Option<TtsArgs> {
     let trimmed = message.trim();
     let lower = trimmed.to_ascii_lowercase();
     if !lower.starts_with("!tts") {
         return None;
     }
-    let rest = &trimmed[4..];
-    // Require a separator (space) after the command token so `!ttssomething`
-    // is not treated as a command.
-    let rest = rest.trim_start();
-    if rest.is_empty() {
-        return Some(String::new());
-    }
-    if !trimmed[4..].starts_with(char::is_whitespace) && !trimmed[4..].is_empty() {
+    let after = &trimmed[4..];
+    // Require a separator after the command token so `!ttssomething` isn't one.
+    if !after.is_empty() && !after.starts_with(char::is_whitespace) {
         return None;
     }
-    Some(rest.to_string())
+
+    let tokens: Vec<&str> = after.split_whitespace().collect();
+    let mut voice: Option<i32> = None;
+    let mut words: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if tok.starts_with('-') && tok.len() > 1 {
+            let body = &tok[1..];
+            let (name, inline) = match body.split_once(':') {
+                Some((n, v)) => (n, Some(v)),
+                None => (body, None),
+            };
+            let value = if let Some(v) = inline {
+                v.to_string()
+            } else if i + 1 < tokens.len() && !tokens[i + 1].starts_with('-') {
+                i += 1;
+                tokens[i].to_string()
+            } else {
+                "true".to_string()
+            };
+            if name.eq_ignore_ascii_case("v") {
+                voice = value.trim().parse::<i32>().ok().filter(|n| *n >= 0);
+            }
+        } else {
+            words.push(tok);
+        }
+        i += 1;
+    }
+    Some(TtsArgs {
+        voice,
+        prompt: words.join(" "),
+    })
 }
 
 #[cfg(test)]
@@ -706,30 +819,41 @@ mod tests {
         assert_eq!(resolve_bundle("https://host/x/vits-piper-foo.tar.bz2"), "vits-piper-foo");
     }
 
+    fn sample_process(processed: &str) -> MessageInProcess {
+        MessageInProcess {
+            message_uuid7: "msg-1".into(),
+            raw_message: None,
+            processed_message: processed.into(),
+            abandon_message: false,
+            audio: Vec::new(),
+            audio_type: String::new(),
+        }
+    }
+
     #[test]
-    fn ack_post_process_carries_audio_and_acks_the_stage() {
+    fn ack_in_process_carries_audio_and_acks_the_stage() {
         let s = Session {
             auth_token: "tok".into(),
             module_name: "tts-rs".into(),
             instance_uuid7: "uuid-1".into(),
         };
-        let c = ack_post_process(
+        let c = ack_in_process(
             &s,
-            "msg-1".into(),
-            "hello".into(),
+            sample_process("hello"),
             vec![1, 2, 3],
             "audio/wav".into(),
         );
         assert_eq!(c.module_name, "tts-rs");
         assert_eq!(c.auth_token, "tok");
-        let post = match c.payload {
-            Some(EnginePayload::MessagePostProcess(p)) => p,
-            _ => panic!("expected MessagePostProcess"),
+        let ip = match c.payload {
+            Some(EnginePayload::MessageInProcess(p)) => p,
+            _ => panic!("expected MessageInProcess"),
         };
-        assert_eq!(post.message_uuid7, "msg-1");
-        assert_eq!(post.processed_message, "hello");
-        assert_eq!(post.audio, vec![1, 2, 3]);
-        assert_eq!(post.audio_type, "audio/wav");
+        assert_eq!(ip.message_uuid7, "msg-1");
+        assert_eq!(ip.processed_message, "hello", "processed message echoed unchanged");
+        assert!(!ip.abandon_message);
+        assert_eq!(ip.audio, vec![1, 2, 3]);
+        assert_eq!(ip.audio_type, "audio/wav");
     }
 
     #[test]
@@ -739,23 +863,133 @@ mod tests {
             module_name: "tts-rs".into(),
             instance_uuid7: "u".into(),
         };
-        let c = ack_post_process(&s, "m".into(), String::new(), Vec::new(), String::new());
-        let post = match c.payload {
-            Some(EnginePayload::MessagePostProcess(p)) => p,
-            _ => panic!("expected MessagePostProcess"),
+        let c = ack_in_process(&s, sample_process(""), Vec::new(), String::new());
+        let ip = match c.payload {
+            Some(EnginePayload::MessageInProcess(p)) => p,
+            _ => panic!("expected MessageInProcess"),
         };
-        assert!(post.audio.is_empty());
-        assert_eq!(post.audio_type, "");
+        assert!(ip.audio.is_empty());
+        assert_eq!(ip.audio_type, "");
     }
 
     #[test]
-    fn extract_tts_prompt_only_accepts_tts_commands() {
-        assert_eq!(extract_tts_prompt("!tts hello world"), Some("hello world".into()));
-        assert_eq!(extract_tts_prompt("  !tts   hello  "), Some("hello".into()));
-        assert_eq!(extract_tts_prompt("!tts"), Some(String::new()));
-        assert_eq!(extract_tts_prompt("hello world"), None, "plain chat is never spoken");
-        assert_eq!(extract_tts_prompt("!ttssomething"), None, "no separator after the token");
-        assert_eq!(extract_tts_prompt("!tts hello"), Some("hello".into()));
-        assert_eq!(extract_tts_prompt("!TTS HELLO"), Some("HELLO".into()), "case-insensitive command");
+    fn non_tts_in_process_acks_empty_audio() {
+        let s = Session {
+            auth_token: "t".into(),
+            module_name: "tts-rs".into(),
+            instance_uuid7: "u".into(),
+        };
+        let process = sample_process("just chatting");
+        assert!(
+            parse_tts(&process.processed_message).is_none(),
+            "plain chat is never spoken"
+        );
+        let c = ack_in_process(&s, process, Vec::new(), String::new());
+        let ip = match c.payload {
+            Some(EnginePayload::MessageInProcess(p)) => p,
+            _ => panic!("expected MessageInProcess"),
+        };
+        assert!(ip.audio.is_empty(), "non-!tts message acks with no audio");
+        assert_eq!(ip.audio_type, "");
+        assert_eq!(ip.processed_message, "just chatting");
+    }
+
+    #[test]
+    fn parse_tts_only_accepts_tts_commands() {
+        assert_eq!(parse_tts("!tts hello world").unwrap().prompt, "hello world");
+        assert_eq!(parse_tts("  !tts   hello  ").unwrap().prompt, "hello");
+        assert_eq!(parse_tts("!tts").unwrap().prompt, "");
+        assert!(parse_tts("hello world").is_none(), "plain chat is never spoken");
+        assert!(parse_tts("!ttssomething").is_none(), "no separator after the token");
+        assert_eq!(parse_tts("!tts hello").unwrap().prompt, "hello");
+        assert_eq!(parse_tts("!TTS HELLO").unwrap().prompt, "HELLO", "case-insensitive command");
+    }
+
+    #[test]
+    fn parse_tts_reads_the_voice_flag_and_strips_it_from_the_prompt() {
+        // `-v <id>` (space form) is read and removed from the spoken prompt.
+        let a = parse_tts("!tts -v 250 hello chat").unwrap();
+        assert_eq!(a.voice, Some(250));
+        assert_eq!(a.prompt, "hello chat");
+        // `-v:<id>` (inline form).
+        let b = parse_tts("!tts -v:12 hi").unwrap();
+        assert_eq!(b.voice, Some(12));
+        assert_eq!(b.prompt, "hi");
+        // No flag -> no override (the config default is used).
+        assert_eq!(parse_tts("!tts hi there").unwrap().voice, None);
+        // Non-numeric value -> ignored.
+        assert_eq!(parse_tts("!tts -v loud hi").unwrap().voice, None);
+        // Unknown flags are consumed but ignored; the prompt is what remains.
+        let c = parse_tts("!tts -r 1.5 -v 7 hello").unwrap();
+        assert_eq!(c.voice, Some(7));
+        assert_eq!(c.prompt, "hello");
+    }
+
+    #[test]
+    fn resolve_voice_prefers_override_then_disk_then_memory() {
+        // -v wins over everything.
+        assert_eq!(resolve_voice(Some(250), Some(100), Some(200)), 250);
+        // No override -> the FRESH disk value wins over the stale in-memory one.
+        assert_eq!(resolve_voice(None, Some(100), Some(200)), 200);
+        // Disk read failed -> fall back to the in-memory value.
+        assert_eq!(resolve_voice(None, Some(100), None), 100);
+    }
+
+    #[test]
+    fn resolve_voice_defaults_to_zero_and_clamps() {
+        assert_eq!(resolve_voice(None, None, None), 0, "no value -> module default 0");
+        assert_eq!(resolve_voice(Some(-7), None, None), 0, "negative clamps to 0");
+        assert_eq!(resolve_voice(Some(9999), None, None), 903, "over clamps to the range");
+    }
+
+    #[test]
+    fn config_v_accepts_a_number_or_a_string() {
+        let n: Config = serde_json::from_str(r#"{"v": 250}"#).unwrap();
+        assert_eq!(n.v, Some(250));
+        let s: Config = serde_json::from_str(r#"{"v": "250"}"#).unwrap();
+        assert_eq!(s.v, Some(250), "a string id from the editor still parses");
+        let blank: Config = serde_json::from_str(r#"{"v": ""}"#).unwrap();
+        assert_eq!(blank.v, None, "blank falls back to the module default");
+    }
+
+    #[test]
+    fn load_config_migrates_the_legacy_speaker_id_into_v_and_drops_it() {
+        let dir = std::env::temp_dir().join(format!("ckt-tts-load-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"module_specific":{"speaker_id":42}}"#).unwrap();
+        let (config, _) = load_config(&path);
+        assert_eq!(config.v, Some(42), "legacy speaker_id migrated into v");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["module_specific"]["v"], 42, "v persisted");
+        assert!(
+            root["module_specific"].get("speaker_id").is_none(),
+            "legacy speaker_id dropped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_config_sets_v_and_drops_the_legacy_speaker_id() {
+        let dir = std::env::temp_dir().join(format!("ckt-tts-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"module_name":"tts-rs","module_specific":{"model":"m","speaker_id":42}}"#,
+        )
+        .unwrap();
+        write_config(&path, 43);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["module_specific"]["v"], 43, "v written");
+        assert_eq!(root["module_specific"]["model"], "m", "other keys preserved");
+        assert_eq!(root["module_name"], "tts-rs", "top level preserved");
+        assert!(
+            root["module_specific"].get("speaker_id").is_none(),
+            "legacy speaker_id removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

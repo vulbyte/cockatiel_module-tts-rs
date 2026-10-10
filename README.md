@@ -1,6 +1,6 @@
 # tts-rs (Rust)
 
-Cockatiel's **default** text-to-speech module. A `postprocess` module that
+Cockatiel's **default** text-to-speech module. An `inprocess` module that
 renders chat messages into speech using a Piper VITS model via
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — a single native Rust
 binary with **no Python, no pip, no torch**. This is the zero-setup path the
@@ -8,43 +8,62 @@ majority of users should use.
 
 ## How it works
 
-- Connects to the engine as a postprocess module (same protocol as every other
-  Rust module, via [cockatiel-client](https://github.com/vulbyte/cockatiel_client-rs)).
+- Connects to the engine as an **in-process** module (same protocol as every
+  other Rust module, via [cockatiel-client](https://github.com/vulbyte/cockatiel_client-rs)).
 - On **startup** (never on the first message), downloads a self-contained model
   bundle into `voices/` — a `.tar.bz2` of `.onnx` + `tokens.txt` +
   `espeak-ng-data` from the sherpa-onnx `tts-models` release. Default:
-  `vits-piper-en_US-lessac-medium` (~67 MB).
-- For each `MessagePostProcess`, renders the message text to speech, attaches
-  the audio (`audio/wav`) to the reply, and the engine persists it to the
-  timeline. If rendering fails, the module still acks (empty audio) so the
-  message completes instead of hanging.
+  `vits-piper-en_US-libritts_r-medium` (~100 MB, 904 speakers).
+- It is **command-scoped**: it only renders `!tts <text>` messages (everything
+  else is acked with empty audio). For each such message it attaches the audio
+  (`audio/wav`) to its `MessageInProcess` ack; the engine carries the audio
+  forward and hands it to the post-process displays (term-chat) **inline**, so
+  the clip plays with no module-to-module fetch. If rendering fails, the module
+  still acks (empty audio) so the chain completes instead of hanging.
 - Re-delivered messages are acked from a cached clip rather than re-rendered.
+
+## Command
+
+```
+!tts [-v <id>] <prompt>
+```
+
+- `<prompt>` is spoken aloud.
+- `-v <id>` (or `-v:<id>`) picks the voice/speaker id **for that message only**,
+  overriding the configured default. If no `-v` is given, the default (`v`) is
+  used. Valid ids depend on the model (0–903 for the default `libritts_r`
+  bundle). The engine parses the flag and passes it to the module; `!help tts-rs`
+  lists it.
 
 ## Config (`config.json` → `module_specific`)
 
 | key | default | meaning |
 | --- | --- | --- |
-| `model` | `vits-piper-en_US-lessac-medium` | model bundle name, a `.tar.bz2` URL, or a local unpacked dir |
+| `model` | `vits-piper-en_US-libritts_r-medium` | model bundle name, a `.tar.bz2` URL, or a local unpacked dir |
 | `max_chars` | `1000` | truncate longer messages before rendering |
 | `max_audio_bytes` | `5242880` | drop audio larger than this |
 | `play_locally` | `false` | also play on this machine |
-| `speaker_id` | `0` | multi-speaker voice id |
+| `v` | `0` | **default voice/speaker id** — the `-v` flag alias; auto-filled on first start |
 | `reconnect_base_secs` / `reconnect_max_secs` | `1` / `30` | engine reconnect backoff |
 
 ### Changing the voice
 
-Edit `config.json` in the module directory (it lives next to `tts_service.py`
-in the module folder; the TUI also exposes these fields under the module's
-edit screen). The `model` field selects the voice/bundle and `speaker_id`
-picks a voice within a multi-voice bundle.
+Set `module_specific.v` to the voice/speaker id you want as the default (the
+module auto-fills this key on first start; the config editor under the module's
+edit screen exposes it). `-v <id>` on a single `!tts` message overrides it for
+that message. The `model` field selects the voice/bundle. `v` is the only
+default-voice key — there is no separate `speaker_id` setting.
 
-The default voice is the **US English "lessac medium"** Piper model
-(`vits-piper-en_US-lessac-medium`). Other ready-made bundles (all downloadable
-on first start, no Python needed):
+The default voice is the **US English "libritts_r medium"** Piper model
+(`vits-piper-en_US-libritts_r-medium`) — a 904-speaker audiobook corpus, so set
+`v` to choose a voice (see below). Other ready-made bundles (all
+downloadable on first start, no Python needed):
 
 | `model` | voice |
 | --- | --- |
-| `vits-piper-en_US-lessac-medium` | US English, "lessac" medium (default) |
+| `vits-piper-en_US-libritts_r-medium` | US English, "libritts_r" medium, 904 speakers (default) |
+| `vits-piper-en_GB-vctk-medium` | British English, VCTK, 109 speakers |
+| `vits-piper-en_US-lessac-medium` | US English, "lessac" medium |
 | `vits-piper-en_US-lessac-low` | US English, "lessac" low |
 | `vits-piper-en_US-lessac-high` | US English, "lessac" high |
 | `vits-piper-en_US-amy-medium` | US English, "amy" medium |
@@ -61,7 +80,7 @@ then restart the module (press `x` then `s` on it in the modules window). The
 new bundle downloads into `voices/` on the next start. A full `.tar.bz2` URL
 or a local unpacked directory also works.
 
-`speaker_id` only matters for multi-speaker bundles (check `num_speakers` in
+`v` only matters for multi-speaker bundles (check `num_speakers` in
 the model card); the single-speaker Piper voices ignore it.
 
 ## Dependencies

@@ -23,7 +23,7 @@
     "build",
     "--release"
   ],
-  "capabilities": "postprocess",
+  "capabilities": "inprocess",
   "command_flags": [
     "run",
     "--release"
@@ -54,22 +54,22 @@
       "sensitive": false
     },
     {
-      "key": "speaker_id",
-      "label": "Speaker ID",
+      "key": "v",
+      "label": "Default Voice (speaker id; the -v flag alias)",
       "list": false,
       "sensitive": false
     }
   ],
   "description": "Local text-to-speech (default). Renders chat messages to speech with a Piper VITS model via sherpa-onnx — a single native binary, no Python/pip/torch. The model bundle is downloaded once at startup into voices/. For model families not supported here, use the opt-in tts-experimental-py module.",
   "launch_command": "cargo",
-  "min_rank": 0,
+  "min_rank": 0.4000000059604645,
   "name": "tts-rs",
-  "price": 0,
-  "root_file": "./src/main.rs",
-  "version": "0.1.0",
+  "price": 100,
   "release": {
-    "repo": "vulbyte/cockatiel_module-tts-rs",
     "base_url": "https://github.com/vulbyte/cockatiel_module-tts-rs/releases/download",
+    "repo": "vulbyte/cockatiel_module-tts-rs",
     "tag": "v0.1.0"
-  }
+  },
+  "root_file": "./src/main.rs",
+  "version": "0.1.0"
 }
